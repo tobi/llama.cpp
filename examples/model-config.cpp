@@ -1,7 +1,10 @@
 #include "model-config.h"
 
+#ifdef GGML_USE_CUBLAS
+#include "ggml-cuda.h"
+#endif
+
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -296,38 +299,26 @@ void model_def_apply_hw(model_def & def, const hw_info & hw) {
     }
 }
 
-static std::string run_cmd(const char * cmd) {
-    std::array<char, 256> buf;
-    std::string result;
-    FILE * pipe = popen(cmd, "r");
-    if (!pipe) return result;
-    while (fgets(buf.data(), buf.size(), pipe) != nullptr) {
-        result += buf.data();
-    }
-    pclose(pipe);
-    return result;
-}
-
 hw_info hw_detect() {
     hw_info hw;
 
-    // VRAM via nvidia-smi
-    std::string smi = run_cmd("nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits 2>/dev/null");
-    if (!smi.empty()) {
-        // first line is the primary GPU
-        size_t nl = smi.find('\n');
-        std::string first = nl == std::string::npos ? smi : smi.substr(0, nl);
-        size_t comma = first.find(',');
-        if (comma != std::string::npos) {
-            std::string mib = trim(first.substr(0, comma));
-            std::string name = trim(first.substr(comma + 1));
-            try {
-                int mib_v = std::stoi(mib);
-                hw.vram_gb = mib_v / 1024;  // MiB -> GiB (truncate)
-                hw.gpu_name = name;
-            } catch (...) {}
-        }
+    // GPU: use ggml's own enumeration when compiled with CUDA. The accessor
+    // does a one-time probe with no cuBLAS init, so this is cheap to call
+    // from the manager at startup. We surface the primary device (highest-
+    // VRAM device wins, mirroring what tensor_split would default to).
+#ifdef GGML_USE_CUBLAS
+    const int n = ggml_cuda_get_device_count();
+    int best = -1;
+    size_t best_mem = 0;
+    for (int i = 0; i < n; ++i) {
+        const size_t m = ggml_cuda_get_device_memory(i);
+        if (m > best_mem) { best_mem = m; best = i; }
     }
+    if (best >= 0) {
+        hw.vram_gb  = (int) (best_mem / (1024ULL * 1024ULL * 1024ULL));
+        hw.gpu_name = ggml_cuda_get_device_name(best);
+    }
+#endif
 
     // RAM via sysconf
     long pages     = sysconf(_SC_PHYS_PAGES);

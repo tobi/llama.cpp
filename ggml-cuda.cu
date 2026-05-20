@@ -1539,6 +1539,13 @@ static int g_device_count = -1;
 static int g_main_device = 0;
 static float g_tensor_split[GGML_CUDA_MAX_DEVICES] = {0};
 
+// Per-device introspection cache, populated by ggml_init_cublas or by the
+// lightweight scan in ggml_cuda_get_device_count. Both paths read the same
+// cudaDeviceProp fields, so callers see consistent values either way.
+#define GGML_CUDA_DEVICE_NAME_MAX 256
+static size_t g_device_memory[GGML_CUDA_MAX_DEVICES] = {0};
+static char   g_device_name  [GGML_CUDA_MAX_DEVICES][GGML_CUDA_DEVICE_NAME_MAX] = {{0}};
+
 static cublasHandle_t g_cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
 static cudaStream_t g_cudaStreams_main[GGML_CUDA_MAX_DEVICES] = { nullptr };
@@ -1555,6 +1562,8 @@ void ggml_init_cublas() {
             cudaDeviceProp prop;
             CUDA_CHECK(cudaGetDeviceProperties(&prop, id));
             fprintf(stderr, "  Device %d: %s\n", id, prop.name);
+            g_device_memory[id] = prop.totalGlobalMem;
+            std::snprintf(g_device_name[id], GGML_CUDA_DEVICE_NAME_MAX, "%s", prop.name);
             g_tensor_split[id] = total_vram;
             total_vram += prop.totalGlobalMem;
         }
@@ -1578,6 +1587,51 @@ void ggml_init_cublas() {
 
         initialized = true;
     }
+}
+
+// Lightweight one-time probe that only reads device props — no cuBLAS, no
+// streams. Sets g_device_count to >= 0 on success; leaves it at -1 only
+// transiently. On failure (no driver / no devices) it is set to 0.
+static void ggml_cuda_probe_devices() {
+    if (g_device_count >= 0) return;
+
+    int count = 0;
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err != cudaSuccess || count <= 0) {
+        g_device_count = 0;
+        return;
+    }
+    if (count > GGML_CUDA_MAX_DEVICES) count = GGML_CUDA_MAX_DEVICES;
+
+    for (int id = 0; id < count; ++id) {
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, id) != cudaSuccess) {
+            // Skip a flaky device but keep going for the rest.
+            g_device_memory[id] = 0;
+            g_device_name[id][0] = '\0';
+            continue;
+        }
+        g_device_memory[id] = prop.totalGlobalMem;
+        std::snprintf(g_device_name[id], GGML_CUDA_DEVICE_NAME_MAX, "%s", prop.name);
+    }
+    g_device_count = count;
+}
+
+int ggml_cuda_get_device_count(void) {
+    ggml_cuda_probe_devices();
+    return g_device_count > 0 ? g_device_count : 0;
+}
+
+size_t ggml_cuda_get_device_memory(int device) {
+    ggml_cuda_probe_devices();
+    if (device < 0 || device >= g_device_count) return 0;
+    return g_device_memory[device];
+}
+
+const char * ggml_cuda_get_device_name(int device) {
+    ggml_cuda_probe_devices();
+    if (device < 0 || device >= g_device_count) return "";
+    return g_device_name[device];
 }
 
 void ggml_cuda_set_tensor_split(const float * tensor_split) {
