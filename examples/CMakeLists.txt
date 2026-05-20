@@ -13,6 +13,8 @@ set(TARGET common)
 add_library(${TARGET} OBJECT
     common.h
     common.cpp
+    model-config.h
+    model-config.cpp
     )
 
 if (BUILD_SHARED_LIBS)
@@ -44,5 +46,6 @@ else()
     endif()
     if (LLAMA_BUILD_SERVER)
         add_subdirectory(server)
+        add_subdirectory(model-manager)
     endif()
 endif()

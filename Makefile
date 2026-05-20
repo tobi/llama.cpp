@@ -2,7 +2,7 @@
 BUILD_TARGETS = main quantize quantize-stats perplexity embedding vdot train-text-from-scratch simple
 
 ifdef LLAMA_BUILD_SERVER
-	BUILD_TARGETS += server
+	BUILD_TARGETS += server model-manager
 	LLAMA_SERVER_VERBOSE ?= 1
 server: private CXXFLAGS += -DSERVER_VERBOSE=$(LLAMA_SERVER_VERBOSE)
 endif
@@ -258,26 +258,29 @@ ggml.o: ggml.c ggml.h ggml-cuda.h
 llama.o: llama.cpp ggml.h ggml-cuda.h ggml-metal.h llama.h llama-util.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-common.o: examples/common.cpp examples/common.h
+common.o: examples/common.cpp examples/common.h examples/model-config.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+model-config.o: examples/model-config.cpp examples/model-config.h examples/common.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 libllama.so: llama.o ggml.o $(OBJS)
 	$(CXX) $(CXXFLAGS) -shared -fPIC -o $@ $^ $(LDFLAGS)
 
 clean:
-	rm -vf *.o *.so main quantize quantize-stats perplexity embedding benchmark-matmult save-load-state server vdot train-text-from-scratch build-info.h
+	rm -vf *.o *.so main quantize quantize-stats perplexity embedding benchmark-matmult save-load-state server model-manager vdot train-text-from-scratch build-info.h
 
 #
 # Examples
 #
 
-main: examples/main/main.cpp                                  build-info.h ggml.o llama.o common.o $(OBJS)
+main: examples/main/main.cpp                                  build-info.h ggml.o llama.o common.o model-config.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 	@echo
 	@echo '====  Run ./main -h for help.  ===='
 	@echo
 
-simple: examples/simple/simple.cpp                            build-info.h ggml.o llama.o common.o $(OBJS)
+simple: examples/simple/simple.cpp                            build-info.h ggml.o llama.o common.o model-config.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 quantize: examples/quantize/quantize.cpp                      build-info.h ggml.o llama.o $(OBJS)
@@ -286,16 +289,19 @@ quantize: examples/quantize/quantize.cpp                      build-info.h ggml.
 quantize-stats: examples/quantize-stats/quantize-stats.cpp    build-info.h ggml.o llama.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
-perplexity: examples/perplexity/perplexity.cpp                build-info.h ggml.o llama.o common.o $(OBJS)
+perplexity: examples/perplexity/perplexity.cpp                build-info.h ggml.o llama.o common.o model-config.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
-embedding: examples/embedding/embedding.cpp                   build-info.h ggml.o llama.o common.o $(OBJS)
+embedding: examples/embedding/embedding.cpp                   build-info.h ggml.o llama.o common.o model-config.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
-save-load-state: examples/save-load-state/save-load-state.cpp build-info.h ggml.o llama.o common.o $(OBJS)
+save-load-state: examples/save-load-state/save-load-state.cpp build-info.h ggml.o llama.o common.o model-config.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
-server: examples/server/server.cpp examples/server/httplib.h examples/server/json.hpp build-info.h ggml.o llama.o common.o $(OBJS)
+server: examples/server/server.cpp examples/server/httplib.h examples/server/json.hpp build-info.h ggml.o llama.o common.o model-config.o $(OBJS)
+	$(CXX) $(CXXFLAGS) -Iexamples/server $(filter-out %.h,$(filter-out %.hpp,$^)) -o $@ $(LDFLAGS)
+
+model-manager: examples/model-manager/model-manager.cpp examples/server/httplib.h examples/server/json.hpp build-info.h ggml.o llama.o common.o model-config.o $(OBJS)
 	$(CXX) $(CXXFLAGS) -Iexamples/server $(filter-out %.h,$(filter-out %.hpp,$^)) -o $@ $(LDFLAGS)
 
 train-text-from-scratch: examples/train-text-from-scratch/train-text-from-scratch.cpp    build-info.h ggml.o llama.o $(OBJS)

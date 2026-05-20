@@ -1,4 +1,5 @@
 #include "common.h"
+#include "model-config.h"
 
 #include <cassert>
 #include <iostream>
@@ -395,6 +396,21 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
                 break;
             }
             params.input_suffix = argv[i];
+        } else if (arg == "--model-config") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+            params.model_config = argv[i];
+            model_def def;
+            std::string err;
+            if (!model_def_load(params.model_config, params, def, err)) {
+                fprintf(stderr, "error: %s\n", err.c_str());
+                exit(1);
+            }
+            // Hardware-aware overrides applied automatically on the CLI path.
+            model_def_apply_hw(def, hw_detect());
+            params = def.params;
         } else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             gpt_print_usage(argc, argv, default_params);
@@ -503,6 +519,8 @@ void gpt_print_usage(int /*argc*/, char ** argv, const gpt_params & params) {
     fprintf(stderr, "  --lora-base FNAME     optional model to use as a base for the layers modified by the LoRA adapter\n");
     fprintf(stderr, "  -m FNAME, --model FNAME\n");
     fprintf(stderr, "                        model path (default: %s)\n", params.model.c_str());
+    fprintf(stderr, "  --model-config FNAME  load model + parameters from a Modelfile (NAME/FROM/PARAMETER/...)\n");
+    fprintf(stderr, "                        hardware tiers (HARDWARE vram_a_b ...) are auto-applied\n");
     fprintf(stderr, "\n");
 }
 

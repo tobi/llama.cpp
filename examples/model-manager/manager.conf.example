@@ -1,0 +1,14 @@
+# model-manager runtime config. Copy to ~/.config/llama/manager.conf (or pass
+# a path as the only argument to ./model-manager). Lines are `key value`; '#'
+# starts a comment. All keys are optional.
+
+server_url            http://127.0.0.1:8080
+models_root           ~/.config/llama/models
+idle_timeout_seconds  120
+poll_interval_seconds 5
+autoload              true
+
+# Repeat autoload_tag once per tag. If you set no tags, any Modelfile in
+# models_root is eligible. The first qualifying file (alphabetical order)
+# wins, so name your files for the order you want them tried.
+autoload_tag          default

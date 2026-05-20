@@ -1,6 +1,7 @@
 #include "common.h"
 #include "llama.h"
 #include "build-info.h"
+#include "model-config.h"
 
 // single thread
 #define CPPHTTPLIB_THREAD_POOL_COUNT 1
@@ -11,6 +12,8 @@
 
 #include "httplib.h"
 #include "json.hpp"
+
+#include <chrono>
 
 #ifndef SERVER_VERBOSE
 #define SERVER_VERBOSE 1
@@ -119,6 +122,11 @@ struct llama_server_context {
     llama_context * ctx = nullptr;
     gpt_params params;
 
+    // model orchestration state
+    model_def   loaded_def;            // populated when a Modelfile is the source
+    std::string source_config;         // path to Modelfile if loaded that way
+    int64_t     last_activity_ms = 0;  // monotonic-ish wall clock of last request
+
     bool truncated = false;
     bool stopped_eos = false;
     bool stopped_word = false;
@@ -127,6 +135,14 @@ struct llama_server_context {
     int32_t multibyte_pending = 0;
 
     ~llama_server_context() {
+        unloadModel();
+    }
+
+    bool isLoaded() const {
+        return model != nullptr && ctx != nullptr;
+    }
+
+    void unloadModel() {
         if (ctx) {
             llama_free(ctx);
             ctx = nullptr;
@@ -135,6 +151,15 @@ struct llama_server_context {
             llama_free_model(model);
             model = nullptr;
         }
+        embd.clear();
+        last_n_tokens.clear();
+        generated_text.clear();
+        has_next_token = false;
+        n_past = 0;
+        n_remain = 0;
+        num_tokens_predicted = 0;
+        source_config.clear();
+        loaded_def = model_def();
     }
 
     void rewind() {
@@ -154,6 +179,9 @@ struct llama_server_context {
     }
 
     bool loadModel(const gpt_params & params_) {
+        if (isLoaded()) {
+            unloadModel();
+        }
         params = params_;
         std::tie(model, ctx) = llama_init_from_gpt_params(params);
         if (model == nullptr) {
@@ -163,6 +191,22 @@ struct llama_server_context {
 
         last_n_tokens.resize(params.n_ctx);
         std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
+        return true;
+    }
+
+    bool loadModelFromConfig(const std::string & cfg_path, std::string & err) {
+        gpt_params defaults;
+        model_def  def;
+        if (!model_def_load(cfg_path, defaults, def, err)) {
+            return false;
+        }
+        model_def_apply_hw(def, hw_detect());
+        if (!loadModel(def.params)) {
+            err = "failed to instantiate model from " + cfg_path;
+            return false;
+        }
+        loaded_def    = def;
+        source_config = cfg_path;
         return true;
     }
 
@@ -473,6 +517,7 @@ static void server_print_usage(const char * argv0, const gpt_params & params,
 #endif
     fprintf(stderr, "  -m FNAME, --model FNAME\n");
     fprintf(stderr, "                        model path (default: %s)\n", params.model.c_str());
+    fprintf(stderr, "  --model-config FNAME  load from a Modelfile (FROM/NAME/PARAMETER/HARDWARE...)\n");
     fprintf(stderr, "  -a ALIAS, --alias ALIAS\n");
     fprintf(stderr, "                        set an alias for the model, will be added as `model` field in completion response\n");
     fprintf(stderr, "  --lora FNAME          apply LoRA adapter (implies --no-mmap)\n");
@@ -518,6 +563,20 @@ static void server_params_parse(int argc, char ** argv, server_params & sparams,
                 break;
             }
             params.model = argv[i];
+        } else if (arg == "--model-config") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+            params.model_config = argv[i];
+            model_def def;
+            std::string err;
+            if (!model_def_load(params.model_config, params, def, err)) {
+                fprintf(stderr, "error: %s\n", err.c_str());
+                exit(1);
+            }
+            model_def_apply_hw(def, hw_detect());
+            params = def.params;
         } else if (arg == "-a" || arg == "--alias") {
             if (++i >= argc) {
                 invalid_param = true;
@@ -775,6 +834,19 @@ static void log_server_request(const Request & req, const Response & res) {
     });
 }
 
+// Wall-clock ms, suitable for diffing for idle decisions.
+static int64_t now_ms() {
+    return (int64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+static bool require_loaded(llama_server_context & llama, Response & res) {
+    if (llama.isLoaded()) return true;
+    res.status = 503;
+    res.set_content("{\"error\":\"no model loaded; POST /load first\"}", "application/json");
+    return false;
+}
+
 int main(int argc, char ** argv) {
     // own arguments required by this example
     gpt_params params;
@@ -801,9 +873,27 @@ int main(int argc, char ** argv) {
         { "system_info", llama_print_system_info() },
     });
 
-    // load the model
-    if (!llama.loadModel(params)) {
-        return 1;
+    // Load the model at startup, unless --model-config was deliberately empty
+    // and -m was not given — in that case we start cold and rely on /load.
+    const bool have_initial_model =
+        !params.model.empty() && params.model != "models/7B/ggml-model.bin";
+    if (have_initial_model) {
+        if (!params.model_config.empty()) {
+            // /completion path through CLI already merged model_config into params,
+            // but we also want to remember the source for /slots introspection.
+            std::string err;
+            // Re-load from config to populate llama.loaded_def; if this fails
+            // we fall back to the raw params we already have.
+            if (!llama.loadModelFromConfig(params.model_config, err)) {
+                LOG_WARNING("model-config reload failed, using merged params", { { "err", err } });
+                if (!llama.loadModel(params)) return 1;
+            }
+        } else {
+            if (!llama.loadModel(params)) return 1;
+        }
+        llama.last_activity_ms = now_ms();
+    } else {
+        LOG_INFO("starting cold: no model loaded; awaiting POST /load", {});
     }
 
     Server svr;
@@ -818,6 +908,8 @@ int main(int argc, char ** argv) {
     });
 
     svr.Post("/completion", [&llama](const Request & req, Response & res) {
+        if (!require_loaded(llama, res)) return;
+        llama.last_activity_ms = now_ms();
         llama.rewind();
         llama_reset_timings(llama.ctx);
 
@@ -912,6 +1004,8 @@ int main(int argc, char ** argv) {
     });
 
     svr.Post("/tokenize", [&llama](const Request & req, Response & res) {
+        if (!require_loaded(llama, res)) return;
+        llama.last_activity_ms = now_ms();
         const json body = json::parse(req.body);
         const std::string content = body.value("content", "");
         const std::vector<llama_token> tokens = llama_tokenize(llama.ctx, content, false);
@@ -920,6 +1014,8 @@ int main(int argc, char ** argv) {
     });
 
     svr.Post("/embedding", [&llama](const Request & req, Response & res) {
+        if (!require_loaded(llama, res)) return;
+        llama.last_activity_ms = now_ms();
         const json body = json::parse(req.body);
 
         llama.rewind();
@@ -932,6 +1028,114 @@ int main(int argc, char ** argv) {
 
         const json data = format_embedding_response(llama);
         return res.set_content(data.dump(), "application/json");
+    });
+
+    // ---- Model orchestration endpoints ----
+
+    // GET /slots  -> { loaded: bool, alias, model, source, idle_ms, last_activity_ms,
+    //                  n_ctx, n_gpu_layers, tags, speculative? }
+    svr.Get("/slots", [&llama](const Request &, Response & res) {
+        const int64_t t = now_ms();
+        std::ostringstream o;
+        o << "{";
+        o << "\"loaded\":" << (llama.isLoaded() ? "true" : "false");
+        if (llama.isLoaded()) {
+            o << ",";
+            o << "\"alias\":\""  << llama.params.model_alias << "\",";
+            o << "\"model\":\""  << llama.params.model << "\",";
+            o << "\"source\":\"" << llama.source_config << "\",";
+            o << "\"n_ctx\":"        << llama.params.n_ctx        << ",";
+            o << "\"n_gpu_layers\":" << llama.params.n_gpu_layers << ",";
+            o << "\"n_batch\":"      << llama.params.n_batch      << ",";
+            o << "\"last_activity_ms\":" << llama.last_activity_ms << ",";
+            o << "\"idle_ms\":" << (t - llama.last_activity_ms) << ",";
+            o << "\"tags\":[";
+            for (size_t i = 0; i < llama.loaded_def.tags.size(); ++i) {
+                if (i) o << ",";
+                o << "\"" << llama.loaded_def.tags[i] << "\"";
+            }
+            o << "]";
+            if (!llama.loaded_def.speculative.model.empty()) {
+                o << ",\"speculative\":{"
+                  << "\"model\":\"" << llama.loaded_def.speculative.model << "\","
+                  << "\"max\":" << llama.loaded_def.speculative.max_draft << ","
+                  << "\"min\":" << llama.loaded_def.speculative.min_draft
+                  << "}";
+            }
+        }
+        o << "}";
+        res.set_content(o.str(), "application/json");
+    });
+
+    // GET /v1/models  -> OpenAI-shaped list with the single currently-loaded model.
+    svr.Get("/v1/models", [&llama](const Request &, Response & res) {
+        std::ostringstream o;
+        o << "{\"object\":\"list\",\"data\":[";
+        if (llama.isLoaded()) {
+            o << "{\"id\":\""    << llama.params.model_alias << "\","
+              <<  "\"object\":\"model\","
+              <<  "\"owned_by\":\"llama.cpp\""
+              << "}";
+        }
+        o << "]}";
+        res.set_content(o.str(), "application/json");
+    });
+
+    // POST /load  body: { "model_config": "<path-to-Modelfile>" }
+    //                 OR { "model": "<gguf path>", "alias": "name", "n_ctx": ... }
+    svr.Post("/load", [&llama](const Request & req, Response & res) {
+        json body;
+        try { body = json::parse(req.body); }
+        catch (const std::exception & e) {
+            res.status = 400;
+            res.set_content(std::string("{\"error\":\"bad JSON: ") + e.what() + "\"}", "application/json");
+            return;
+        }
+
+        if (body.contains("model_config")) {
+            const std::string cfg = body.value("model_config", "");
+            std::string err;
+            if (!llama.loadModelFromConfig(cfg, err)) {
+                res.status = 400;
+                res.set_content("{\"error\":\"" + err + "\"}", "application/json");
+                return;
+            }
+        } else {
+            gpt_params p;
+            if (body.contains("model"))        p.model        = body.value("model", "");
+            if (body.contains("alias"))        p.model_alias  = body.value("alias", "");
+            if (body.contains("n_ctx"))        p.n_ctx        = body.value("n_ctx", p.n_ctx);
+            if (body.contains("n_gpu_layers")) p.n_gpu_layers = body.value("n_gpu_layers", p.n_gpu_layers);
+            if (body.contains("n_batch"))      p.n_batch      = body.value("n_batch", p.n_batch);
+            if (body.contains("temp"))         p.temp         = body.value("temp", p.temp);
+            if (body.contains("top_p"))        p.top_p        = body.value("top_p", p.top_p);
+            if (body.contains("top_k"))        p.top_k        = body.value("top_k", p.top_k);
+            if (body.contains("seed"))         p.seed         = body.value("seed", p.seed);
+            if (body.contains("embedding"))    p.embedding    = body.value("embedding", p.embedding);
+            if (p.model.empty()) {
+                res.status = 400;
+                res.set_content("{\"error\":\"missing `model` or `model_config`\"}", "application/json");
+                return;
+            }
+            if (p.model_alias.empty() || p.model_alias == "unknown") p.model_alias = p.model;
+            if (!llama.loadModel(p)) {
+                res.status = 500;
+                res.set_content("{\"error\":\"loadModel failed\"}", "application/json");
+                return;
+            }
+        }
+        llama.last_activity_ms = now_ms();
+        res.set_content("{\"ok\":true,\"alias\":\"" + llama.params.model_alias + "\"}",
+                        "application/json");
+    });
+
+    // POST /unload  -> drops the current model. Safe to call even if none loaded.
+    svr.Post("/unload", [&llama](const Request &, Response & res) {
+        const bool was_loaded = llama.isLoaded();
+        llama.unloadModel();
+        std::ostringstream o;
+        o << "{\"ok\":true,\"was_loaded\":" << (was_loaded ? "true" : "false") << "}";
+        res.set_content(o.str(), "application/json");
     });
 
     svr.set_logger(log_server_request);

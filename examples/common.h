@@ -58,6 +58,7 @@ struct gpt_params {
 
     std::string lora_adapter = "";  // lora adapter path
     std::string lora_base    = "";  // base model path for the lora adapter
+    std::string model_config = "";  // optional Modelfile path; values it sets override CLI defaults
 
     bool memory_f16        = true;  // use f16 instead of f32 for memory kv
     bool random_prompt     = false; // do not randomize prompt if none provided
