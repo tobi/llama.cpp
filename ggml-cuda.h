@@ -15,6 +15,13 @@ struct ggml_tensor_extra_gpu {
 void   ggml_init_cublas(void);
 void   ggml_cuda_set_tensor_split(const float * tensor_split);
 
+// Lightweight hardware introspection. Safe to call without first calling
+// ggml_init_cublas — they trigger a one-time, cuBLAS-free scan if needed.
+// Return 0 / "" when no CUDA runtime / no devices are visible.
+int          ggml_cuda_get_device_count(void);
+size_t       ggml_cuda_get_device_memory(int device);
+const char * ggml_cuda_get_device_name(int device);
+
 void   ggml_cuda_mul(const struct ggml_tensor * src0, const struct ggml_tensor * src1, struct ggml_tensor * dst);
 bool   ggml_cuda_can_mul_mat(const struct ggml_tensor * src0, const struct ggml_tensor * src1, struct ggml_tensor * dst);
 size_t ggml_cuda_mul_mat_get_wsize(const struct ggml_tensor * src0, const struct ggml_tensor * src1, struct ggml_tensor * dst);

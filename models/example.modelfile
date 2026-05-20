@@ -1,0 +1,31 @@
+# Example Modelfile. Place files like this one in ~/.config/llama/models/
+# and the model-manager will autoload one whose tags match `autoload_tag`
+# in manager.conf.
+
+NAME llama2-7b-chat
+FROM models/7B/ggml-model.bin
+
+SYSTEM """You are a precise, concise assistant. Answer in plain text unless
+the user asks for code, in which case use fenced blocks."""
+
+TAG default
+TAG chat
+
+PARAMETER n_ctx          2048
+PARAMETER n_batch        512
+PARAMETER temp           0.8
+PARAMETER top_p          0.95
+PARAMETER top_k          40
+PARAMETER repeat_penalty 1.10
+
+# Hardware-aware overrides. The single tier whose [low,high) GiB range covers
+# detected VRAM wins; tiers are unioned by key so you can specialise one
+# parameter at a time without restating the rest.
+HARDWARE vram_0_8     n_ctx        1024
+HARDWARE vram_0_8     n_gpu_layers 0
+HARDWARE vram_8_16    n_ctx        2048
+HARDWARE vram_8_16    n_gpu_layers 20
+HARDWARE vram_16_24   n_ctx        4096
+HARDWARE vram_16_24   n_gpu_layers 32
+HARDWARE vram_24_1000 n_ctx        4096
+HARDWARE vram_24_1000 n_gpu_layers 99

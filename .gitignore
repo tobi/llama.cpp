@@ -25,6 +25,7 @@ build-sanitize-thread/
 out/
 
 models/*
+!models/*.modelfile
 *.bin
 
 /main
@@ -38,6 +39,7 @@ models/*
 /benchmark-matmult
 /vdot
 /server
+/model-manager
 /Pipfile
 /libllama.so
 
